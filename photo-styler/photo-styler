@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""
+photo-styler - Transform your photos into different art styles using AI
+
+Picks a random/recent photo from Apple Photos and transforms it using Gemini.
+"""
+
+import argparse
+import subprocess
+import tempfile
+import os
+import sys
+import json
+import random
+from pathlib import Path
+from datetime import datetime
+
+STYLES = {
+    'anime': 'Transform this photo into anime/manga style art. Keep the subjects recognizable but render in vibrant anime aesthetic with cel shading.',
+    'watercolor': 'Transform this photo into a beautiful watercolor painting. Soft edges, flowing colors, artistic brushstrokes.',
+    'oil-painting': 'Transform this photo into a classic oil painting in the style of the Dutch masters. Rich colors, dramatic lighting.',
+    'pixel-art': 'Transform this photo into retro pixel art style, like a 16-bit video game. Maintain recognizable features.',
+    'comic': 'Transform this photo into comic book / graphic novel style with bold outlines and halftone dots.',
+    'ghibli': 'Transform this photo into Studio Ghibli anime style - soft, dreamy, with that distinctive Miyazaki aesthetic.',
+    'cyberpunk': 'Transform this photo into cyberpunk style - neon colors, futuristic elements, high contrast.',
+    'sketch': 'Transform this photo into a detailed pencil sketch. Black and white, artistic shading.',
+    'pop-art': 'Transform this photo into Andy Warhol style pop art with bold colors and repeated patterns.',
+    'impressionist': 'Transform this photo into an impressionist painting like Monet - visible brushstrokes, light and color focus.',
+}
+
+def get_recent_photos(count=10):
+    """Get paths to recent photos from Apple Photos."""
+    script = f'''
+    tell application "Photos"
+        set recentPhotos to (media items whose date is greater than (current date) - 365 * days)
+        set photoList to {{}}
+        set maxCount to {count}
+        set counter to 0
+        repeat with aPhoto in recentPhotos
+            if counter >= maxCount then exit repeat
+            try
+                set photoPath to (filename of aPhoto)
+                set end of photoList to photoPath
+                set counter to counter + 1
+            end try
+        end repeat
+        return photoList
+    end tell
+    '''
+    # This approach is slow, let's use the Photos library directly
+    return None
+
+def get_photos_from_library():
+    """Get photos from the Photos library folder."""
+    photos_lib = Path.home() / "Pictures" / "Photos Library.photoslibrary"
+    originals = photos_lib / "originals"
+    
+    if not originals.exists():
+        # Try alternative path
+        originals = photos_lib / "Masters"
+    
+    if not originals.exists():
+        print("Could not find Photos library originals folder", file=sys.stderr)
+        return []
+    
+    photos = []
+    for ext in ['*.jpg', '*.jpeg', '*.JPG', '*.JPEG', '*.png', '*.PNG', '*.heic', '*.HEIC']:
+        photos.extend(originals.rglob(ext))
+    
+    return photos
+
+def export_photo_from_photos_app(output_path):
+    """Export a random recent photo using AppleScript."""
+    script = f'''
+    tell application "Photos"
+        set allPhotos to every media item
+        set photoCount to count of allPhotos
+        if photoCount = 0 then
+            return "NO_PHOTOS"
+        end if
+        
+        -- Get a random photo from recent ones
+        set randomIndex to (random number from 1 to (min of photoCount and 1000))
+        set thePhoto to item randomIndex of allPhotos
+        
+        -- Export to temp location
+        set exportPath to POSIX file "{output_path}"
+        export {{thePhoto}} to exportPath
+        
+        return "OK"
+    end tell
+    '''
+    try:
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=30)
+        return result.returncode == 0 and "OK" in result.stdout
+    except Exception as e:
+        print(f"Error exporting photo: {e}", file=sys.stderr)
+        return False
+
+def transform_with_gemini(input_path, output_path, style_prompt, api_key):
+    """Transform image using Gemini's image generation."""
+    import base64
+    import urllib.request
+    import urllib.error
+    
+    # Read and encode the image
+    with open(input_path, 'rb') as f:
+        image_data = base64.standard_b64encode(f.read()).decode('utf-8')
+    
+    # Determine mime type
+    ext = Path(input_path).suffix.lower()
+    mime_types = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.heic': 'image/heic'}
+    mime_type = mime_types.get(ext, 'image/jpeg')
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key={api_key}"
+    
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": style_prompt},
+                {
+                    "inline_data": {
+                        "mime_type": mime_type,
+                        "data": image_data
+                    }
+                }
+            ]
+        }],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"]
+        }
+    }
+    
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+    
+    try:
+        with urllib.request.urlopen(req, timeout=120) as response:
+            result = json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        print(f"API error: {e.code} - {e.read().decode()}", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"Request error: {e}", file=sys.stderr)
+        return False
+    
+    # Extract image from response
+    try:
+        for part in result['candidates'][0]['content']['parts']:
+            if 'inlineData' in part:
+                image_b64 = part['inlineData']['data']
+                with open(output_path, 'wb') as f:
+                    f.write(base64.standard_b64decode(image_b64))
+                return True
+    except (KeyError, IndexError) as e:
+        print(f"Could not extract image from response: {e}", file=sys.stderr)
+        print(f"Response: {json.dumps(result, indent=2)[:500]}", file=sys.stderr)
+        return False
+    
+    return False
+
+def get_api_key():
+    """Get Gemini API key from OpenClaw config."""
+    config_path = Path.home() / ".openclaw" / "openclaw.json"
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+            # Try nano-banana-pro skill config
+            if 'skills' in config and 'nano-banana-pro' in config['skills']:
+                key = config['skills']['nano-banana-pro'].get('apiKey')
+                if key:
+                    return key
+            # Try env
+            if 'env' in config:
+                for k in ['GEMINI_API_KEY', 'GOOGLE_API_KEY']:
+                    if k in config['env']:
+                        return config['env'][k]
+        except:
+            pass
+    
+    # Try environment
+    return os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
+
+def main():
+    parser = argparse.ArgumentParser(description='Transform photos into different art styles')
+    parser.add_argument('--style', '-s', choices=list(STYLES.keys()), default='anime',
+                        help='Art style to apply (default: anime)')
+    parser.add_argument('--input', '-i', help='Input image path (default: random from Photos)')
+    parser.add_argument('--output', '-o', help='Output image path (default: ~/Desktop/styled-<timestamp>.png)')
+    parser.add_argument('--list-styles', action='store_true', help='List available styles')
+    parser.add_argument('--api-key', help='Gemini API key (default: from OpenClaw config)')
+    parser.add_argument('--custom-prompt', '-p', help='Custom style prompt (overrides --style)')
+    
+    args = parser.parse_args()
+    
+    if args.list_styles:
+        print("Available styles:")
+        for name, desc in STYLES.items():
+            print(f"  {name:15} - {desc[:60]}...")
+        return 0
+    
+    api_key = args.api_key or get_api_key()
+    if not api_key:
+        print("Error: No Gemini API key found. Set GEMINI_API_KEY or use --api-key", file=sys.stderr)
+        return 1
+    
+    # Get input image
+    input_path = args.input
+    temp_input = None
+    
+    if not input_path:
+        # Export random photo from Photos app
+        print("Picking a random photo from your library...")
+        temp_input = tempfile.mktemp(suffix='.jpg')
+        temp_dir = Path(temp_input).parent
+        
+        if not export_photo_from_photos_app(temp_dir):
+            print("Could not export photo from Photos app", file=sys.stderr)
+            return 1
+        
+        # Find the exported file
+        exported = list(temp_dir.glob('*.jpg')) + list(temp_dir.glob('*.jpeg')) + list(temp_dir.glob('*.HEIC'))
+        if exported:
+            input_path = str(max(exported, key=os.path.getctime))
+        else:
+            print("No exported photo found", file=sys.stderr)
+            return 1
+    
+    if not Path(input_path).exists():
+        print(f"Input file not found: {input_path}", file=sys.stderr)
+        return 1
+    
+    # Set output path
+    output_path = args.output
+    if not output_path:
+        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        output_path = str(Path.home() / 'Desktop' / f'styled-{args.style}-{timestamp}.png')
+    
+    # Get style prompt
+    style_prompt = args.custom_prompt or STYLES[args.style]
+    
+    print(f"Input: {input_path}")
+    print(f"Style: {args.style}")
+    print(f"Output: {output_path}")
+    print("Transforming...")
+    
+    if transform_with_gemini(input_path, output_path, style_prompt, api_key):
+        print(f"✅ Done! Saved to: {output_path}")
+        
+        # Open the result
+        subprocess.run(['open', output_path])
+        return 0
+    else:
+        print("❌ Transformation failed", file=sys.stderr)
+        return 1
+
+if __name__ == '__main__':
+    sys.exit(main())
