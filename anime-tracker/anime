@@ -1,0 +1,446 @@
+#!/usr/bin/env python3
+"""
+anime-tracker: Track your anime watching progress.
+
+Usage:
+  anime add "Title" [--episode N]     Add a show (optionally set episode)
+  anime update "Title" N              Update episode for a show
+  anime list                          List all shows you're tracking
+  anime info "Title"                  Show detailed info for a show
+  anime remove "Title"                Remove a show from tracking
+  anime next                          Show what to watch next
+  anime search "query"                Search for anime on AniList
+
+Storage: ~/.config/anime/shows.json
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.request
+import urllib.error
+from datetime import datetime
+from pathlib import Path
+
+CONFIG_DIR = Path.home() / ".config" / "anime"
+SHOWS_FILE = CONFIG_DIR / "shows.json"
+ANILIST_API = "https://graphql.anilist.co"
+
+
+def load_shows() -> dict:
+    """Load tracked shows from JSON file."""
+    if not SHOWS_FILE.exists():
+        return {}
+    with open(SHOWS_FILE) as f:
+        return json.load(f)
+
+
+def save_shows(shows: dict):
+    """Save tracked shows to JSON file."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(SHOWS_FILE, "w") as f:
+        json.dump(shows, f, indent=2)
+
+
+def anilist_query(query: str, variables: dict = None) -> dict:
+    """Execute a GraphQL query against AniList API."""
+    data = json.dumps({"query": query, "variables": variables or {}}).encode()
+    req = urllib.request.Request(
+        ANILIST_API,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "anime-tracker/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.URLError as e:
+        return {"errors": [{"message": str(e)}]}
+
+
+def search_anime(title: str) -> list:
+    """Search for anime by title on AniList."""
+    query = """
+    query ($search: String) {
+      Page(page: 1, perPage: 5) {
+        media(search: $search, type: ANIME) {
+          id
+          title { romaji english }
+          episodes
+          status
+          averageScore
+          genres
+          description(asHtml: false)
+        }
+      }
+    }
+    """
+    result = anilist_query(query, {"search": title})
+    if "errors" in result:
+        return []
+    return result.get("data", {}).get("Page", {}).get("media", [])
+
+
+def get_anime_info(title: str) -> dict | None:
+    """Get detailed info for an anime."""
+    results = search_anime(title)
+    return results[0] if results else None
+
+
+def cmd_add(args):
+    """Add a show to tracking."""
+    shows = load_shows()
+    title = args.title
+    episode = args.episode or 0
+    
+    # Try to get info from AniList
+    info = get_anime_info(title)
+    
+    slug = title.lower().replace(" ", "-")
+    shows[slug] = {
+        "title": info["title"]["romaji"] if info else title,
+        "english_title": info["title"]["english"] if info else None,
+        "current_episode": episode,
+        "total_episodes": info["episodes"] if info else None,
+        "status": info["status"] if info else "UNKNOWN",
+        "anilist_id": info["id"] if info else None,
+        "added": datetime.now().isoformat(),
+        "updated": datetime.now().isoformat(),
+    }
+    
+    save_shows(shows)
+    
+    show = shows[slug]
+    total = show["total_episodes"]
+    total_str = str(total) if total else "?"
+    print(f"✓ Added: {show['title']}")
+    print(f"  Episode: {episode}/{total_str}")
+    if show["status"]:
+        print(f"  Status: {show['status']}")
+
+
+def cmd_update(args):
+    """Update episode for a show."""
+    shows = load_shows()
+    title = args.title
+    episode = args.episode
+    
+    # Find show by fuzzy match
+    slug = title.lower().replace(" ", "-")
+    match = None
+    for key, show in shows.items():
+        if slug in key or slug in show["title"].lower():
+            match = key
+            break
+    
+    if not match:
+        print(f"✗ Show not found: {title}")
+        print("  Use 'anime list' to see tracked shows")
+        sys.exit(1)
+    
+    shows[match]["current_episode"] = episode
+    shows[match]["updated"] = datetime.now().isoformat()
+    save_shows(shows)
+    
+    show = shows[match]
+    total = show["total_episodes"]
+    total_str = str(total) if total else "?"
+    print(f"✓ Updated: {show['title']}")
+    print(f"  Episode: {episode}/{total_str}")
+    
+    # Progress indicator
+    if total:
+        pct = (episode / total) * 100
+        bar_len = 20
+        filled = int(bar_len * episode / total)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        print(f"  Progress: [{bar}] {pct:.0f}%")
+
+
+def cmd_list(args):
+    """List all tracked shows."""
+    shows = load_shows()
+    
+    if not shows:
+        print("No shows tracked yet.")
+        print("Use 'anime add \"Title\"' to start tracking.")
+        return
+    
+    print("📺 Tracked Anime\n")
+    
+    # Sort by most recently updated
+    sorted_shows = sorted(
+        shows.items(),
+        key=lambda x: x[1].get("updated", ""),
+        reverse=True
+    )
+    
+    for slug, show in sorted_shows:
+        title = show["title"]
+        ep = show["current_episode"]
+        total = show["total_episodes"]
+        status = show.get("status", "")
+        
+        total_str = str(total) if total else "?"
+        
+        # Status emoji
+        if status == "RELEASING":
+            emoji = "🟢"
+        elif status == "FINISHED":
+            emoji = "✓"
+        elif status == "NOT_YET_RELEASED":
+            emoji = "⏳"
+        else:
+            emoji = "•"
+        
+        # Progress bar
+        if total:
+            pct = (ep / total) * 100
+            bar_len = 15
+            filled = int(bar_len * ep / total)
+            bar = "█" * filled + "░" * (bar_len - filled)
+            progress = f"[{bar}] {pct:.0f}%"
+        else:
+            progress = ""
+        
+        print(f"{emoji} {title}")
+        print(f"  Episode {ep}/{total_str} {progress}")
+        print()
+
+
+def cmd_info(args):
+    """Show detailed info for a show."""
+    title = args.title
+    
+    # First check if we're tracking it
+    shows = load_shows()
+    slug = title.lower().replace(" ", "-")
+    tracked = None
+    for key, show in shows.items():
+        if slug in key or slug in show["title"].lower():
+            tracked = show
+            break
+    
+    # Get fresh info from AniList
+    info = get_anime_info(title)
+    
+    if not info and not tracked:
+        print(f"✗ Anime not found: {title}")
+        sys.exit(1)
+    
+    if info:
+        print(f"📺 {info['title']['romaji']}")
+        if info["title"]["english"]:
+            print(f"   ({info['title']['english']})")
+        print()
+        
+        if tracked:
+            ep = tracked["current_episode"]
+            total = info["episodes"] or "?"
+            print(f"Your progress: Episode {ep}/{total}")
+            if info["episodes"]:
+                remaining = info["episodes"] - ep
+                print(f"Remaining: {remaining} episodes")
+            print()
+        
+        print(f"Episodes: {info['episodes'] or 'Unknown'}")
+        print(f"Status: {info['status']}")
+        print(f"Score: {info['averageScore']}/100")
+        print(f"Genres: {', '.join(info['genres'][:5])}")
+        
+        if info.get("description"):
+            # Clean up description (remove HTML, truncate)
+            desc = info["description"]
+            desc = desc.replace("<br>", " ").replace("<br/>", " ")
+            desc = desc.replace("<i>", "").replace("</i>", "")
+            desc = desc.replace("<b>", "").replace("</b>", "")
+            if len(desc) > 300:
+                desc = desc[:297] + "..."
+            print(f"\n{desc}")
+    else:
+        print(f"📺 {tracked['title']}")
+        print(f"Episode: {tracked['current_episode']}/{tracked['total_episodes'] or '?'}")
+
+
+def cmd_remove(args):
+    """Remove a show from tracking."""
+    shows = load_shows()
+    title = args.title
+    
+    slug = title.lower().replace(" ", "-")
+    match = None
+    for key, show in shows.items():
+        if slug in key or slug in show["title"].lower():
+            match = key
+            break
+    
+    if not match:
+        print(f"✗ Show not found: {title}")
+        sys.exit(1)
+    
+    removed = shows.pop(match)
+    save_shows(shows)
+    print(f"✓ Removed: {removed['title']}")
+
+
+def cmd_next(args):
+    """Show what to watch next (prioritize nearly complete shows)."""
+    shows = load_shows()
+    
+    if not shows:
+        print("No shows tracked.")
+        return
+    
+    # Score shows by how close they are to completion
+    # and how recently they were updated
+    recommendations = []
+    
+    for slug, show in shows.items():
+        ep = show["current_episode"]
+        total = show["total_episodes"]
+        status = show.get("status", "")
+        
+        # Skip completed shows
+        if total and ep >= total:
+            continue
+        
+        # Calculate priority score
+        score = 0
+        
+        # Prefer shows that are close to done
+        if total:
+            completion = ep / total
+            score += completion * 50
+            
+            # Bonus for shows with < 10 episodes left
+            remaining = total - ep
+            if remaining <= 10:
+                score += 30
+            elif remaining <= 20:
+                score += 15
+        
+        # Prefer currently airing shows
+        if status == "RELEASING":
+            score += 20
+        
+        recommendations.append((show, score))
+    
+    if not recommendations:
+        print("🎉 All caught up! No episodes to watch.")
+        return
+    
+    # Sort by score descending
+    recommendations.sort(key=lambda x: x[1], reverse=True)
+    
+    print("📺 What to Watch Next\n")
+    
+    for show, score in recommendations[:5]:
+        title = show["title"]
+        ep = show["current_episode"]
+        total = show["total_episodes"]
+        status = show.get("status", "")
+        
+        next_ep = ep + 1
+        total_str = str(total) if total else "?"
+        
+        status_str = ""
+        if status == "RELEASING":
+            status_str = " 🟢 airing"
+        
+        remaining = ""
+        if total:
+            left = total - ep
+            remaining = f" ({left} left)"
+        
+        print(f"→ {title}")
+        print(f"  Watch episode {next_ep}/{total_str}{remaining}{status_str}")
+        print()
+
+
+def cmd_search(args):
+    """Search for anime on AniList."""
+    query = args.query
+    results = search_anime(query)
+    
+    if not results:
+        print(f"No results for: {query}")
+        return
+    
+    print(f"🔍 Search: {query}\n")
+    
+    for anime in results:
+        title = anime["title"]["romaji"]
+        english = anime["title"]["english"]
+        episodes = anime["episodes"] or "?"
+        status = anime["status"]
+        score = anime["averageScore"] or "N/A"
+        
+        print(f"• {title}")
+        if english and english != title:
+            print(f"  ({english})")
+        print(f"  {episodes} eps • {status} • Score: {score}/100")
+        print()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Track your anime watching progress",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  anime add "One Piece" --episode 1200
+  anime update "One Piece" 1205
+  anime list
+  anime next
+  anime info "Jujutsu Kaisen"
+  anime search "attack on titan"
+        """
+    )
+    
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    
+    # add
+    p_add = subparsers.add_parser("add", help="Add a show to tracking")
+    p_add.add_argument("title", help="Anime title")
+    p_add.add_argument("--episode", "-e", type=int, help="Current episode")
+    p_add.set_defaults(func=cmd_add)
+    
+    # update
+    p_update = subparsers.add_parser("update", help="Update episode for a show")
+    p_update.add_argument("title", help="Anime title")
+    p_update.add_argument("episode", type=int, help="Episode number")
+    p_update.set_defaults(func=cmd_update)
+    
+    # list
+    p_list = subparsers.add_parser("list", help="List tracked shows")
+    p_list.set_defaults(func=cmd_list)
+    
+    # info
+    p_info = subparsers.add_parser("info", help="Show detailed info")
+    p_info.add_argument("title", help="Anime title")
+    p_info.set_defaults(func=cmd_info)
+    
+    # remove
+    p_remove = subparsers.add_parser("remove", help="Remove a show")
+    p_remove.add_argument("title", help="Anime title")
+    p_remove.set_defaults(func=cmd_remove)
+    
+    # next
+    p_next = subparsers.add_parser("next", help="What to watch next")
+    p_next.set_defaults(func=cmd_next)
+    
+    # search
+    p_search = subparsers.add_parser("search", help="Search AniList")
+    p_search.add_argument("query", help="Search query")
+    p_search.set_defaults(func=cmd_search)
+    
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

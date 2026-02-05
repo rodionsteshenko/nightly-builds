@@ -1,0 +1,395 @@
+#!/usr/bin/env python3
+"""
+mcu - Track your Marvel Cinematic Universe progress
+"""
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+# MCU content database - chronological order with release dates
+# Updated through early 2026
+MCU_CONTENT = [
+    # Phase 1
+    {"title": "Iron Man", "year": 2008, "type": "movie", "phase": 1, "timeline_order": 3, "post_credits": 1},
+    {"title": "The Incredible Hulk", "year": 2008, "type": "movie", "phase": 1, "timeline_order": 4, "post_credits": 1},
+    {"title": "Iron Man 2", "year": 2010, "type": "movie", "phase": 1, "timeline_order": 5, "post_credits": 1},
+    {"title": "Thor", "year": 2011, "type": "movie", "phase": 1, "timeline_order": 6, "post_credits": 1},
+    {"title": "Captain America: The First Avenger", "year": 2011, "type": "movie", "phase": 1, "timeline_order": 1, "post_credits": 1},
+    {"title": "The Avengers", "year": 2012, "type": "movie", "phase": 1, "timeline_order": 7, "post_credits": 2},
+    
+    # Phase 2
+    {"title": "Iron Man 3", "year": 2013, "type": "movie", "phase": 2, "timeline_order": 8, "post_credits": 1},
+    {"title": "Thor: The Dark World", "year": 2013, "type": "movie", "phase": 2, "timeline_order": 9, "post_credits": 2},
+    {"title": "Captain America: The Winter Soldier", "year": 2014, "type": "movie", "phase": 2, "timeline_order": 10, "post_credits": 2},
+    {"title": "Guardians of the Galaxy", "year": 2014, "type": "movie", "phase": 2, "timeline_order": 11, "post_credits": 2},
+    {"title": "Avengers: Age of Ultron", "year": 2015, "type": "movie", "phase": 2, "timeline_order": 12, "post_credits": 1},
+    {"title": "Ant-Man", "year": 2015, "type": "movie", "phase": 2, "timeline_order": 13, "post_credits": 2},
+    
+    # Phase 3
+    {"title": "Captain America: Civil War", "year": 2016, "type": "movie", "phase": 3, "timeline_order": 14, "post_credits": 2},
+    {"title": "Doctor Strange", "year": 2016, "type": "movie", "phase": 3, "timeline_order": 15, "post_credits": 2},
+    {"title": "Guardians of the Galaxy Vol. 2", "year": 2017, "type": "movie", "phase": 3, "timeline_order": 16, "post_credits": 5},
+    {"title": "Spider-Man: Homecoming", "year": 2017, "type": "movie", "phase": 3, "timeline_order": 17, "post_credits": 2},
+    {"title": "Thor: Ragnarok", "year": 2017, "type": "movie", "phase": 3, "timeline_order": 18, "post_credits": 2},
+    {"title": "Black Panther", "year": 2018, "type": "movie", "phase": 3, "timeline_order": 19, "post_credits": 2},
+    {"title": "Avengers: Infinity War", "year": 2018, "type": "movie", "phase": 3, "timeline_order": 20, "post_credits": 1},
+    {"title": "Ant-Man and the Wasp", "year": 2018, "type": "movie", "phase": 3, "timeline_order": 21, "post_credits": 2},
+    {"title": "Captain Marvel", "year": 2019, "type": "movie", "phase": 3, "timeline_order": 2, "post_credits": 2},
+    {"title": "Avengers: Endgame", "year": 2019, "type": "movie", "phase": 3, "timeline_order": 22, "post_credits": 0},
+    {"title": "Spider-Man: Far From Home", "year": 2019, "type": "movie", "phase": 3, "timeline_order": 23, "post_credits": 2},
+    
+    # Phase 4
+    {"title": "WandaVision", "year": 2021, "type": "show", "phase": 4, "timeline_order": 24, "episodes": 9},
+    {"title": "The Falcon and the Winter Soldier", "year": 2021, "type": "show", "phase": 4, "timeline_order": 25, "episodes": 6},
+    {"title": "Loki", "year": 2021, "type": "show", "phase": 4, "timeline_order": 26, "episodes": 6, "note": "Season 1"},
+    {"title": "Black Widow", "year": 2021, "type": "movie", "phase": 4, "timeline_order": 27, "post_credits": 1},
+    {"title": "What If...?", "year": 2021, "type": "show", "phase": 4, "timeline_order": 28, "episodes": 9, "note": "Season 1"},
+    {"title": "Shang-Chi and the Legend of the Ten Rings", "year": 2021, "type": "movie", "phase": 4, "timeline_order": 29, "post_credits": 2},
+    {"title": "Eternals", "year": 2021, "type": "movie", "phase": 4, "timeline_order": 30, "post_credits": 2},
+    {"title": "Hawkeye", "year": 2021, "type": "show", "phase": 4, "timeline_order": 31, "episodes": 6},
+    {"title": "Spider-Man: No Way Home", "year": 2021, "type": "movie", "phase": 4, "timeline_order": 32, "post_credits": 2},
+    {"title": "Moon Knight", "year": 2022, "type": "show", "phase": 4, "timeline_order": 33, "episodes": 6},
+    {"title": "Doctor Strange in the Multiverse of Madness", "year": 2022, "type": "movie", "phase": 4, "timeline_order": 34, "post_credits": 2},
+    {"title": "Ms. Marvel", "year": 2022, "type": "show", "phase": 4, "timeline_order": 35, "episodes": 6},
+    {"title": "Thor: Love and Thunder", "year": 2022, "type": "movie", "phase": 4, "timeline_order": 36, "post_credits": 2},
+    {"title": "She-Hulk: Attorney at Law", "year": 2022, "type": "show", "phase": 4, "timeline_order": 37, "episodes": 9},
+    {"title": "Werewolf by Night", "year": 2022, "type": "special", "phase": 4, "timeline_order": 38},
+    {"title": "Black Panther: Wakanda Forever", "year": 2022, "type": "movie", "phase": 4, "timeline_order": 39, "post_credits": 2},
+    {"title": "The Guardians of the Galaxy Holiday Special", "year": 2022, "type": "special", "phase": 4, "timeline_order": 40},
+    
+    # Phase 5
+    {"title": "Ant-Man and the Wasp: Quantumania", "year": 2023, "type": "movie", "phase": 5, "timeline_order": 41, "post_credits": 2},
+    {"title": "Guardians of the Galaxy Vol. 3", "year": 2023, "type": "movie", "phase": 5, "timeline_order": 42, "post_credits": 2},
+    {"title": "Secret Invasion", "year": 2023, "type": "show", "phase": 5, "timeline_order": 43, "episodes": 6},
+    {"title": "Loki Season 2", "year": 2023, "type": "show", "phase": 5, "timeline_order": 44, "episodes": 6},
+    {"title": "The Marvels", "year": 2023, "type": "movie", "phase": 5, "timeline_order": 45, "post_credits": 2},
+    {"title": "What If...? Season 2", "year": 2023, "type": "show", "phase": 5, "timeline_order": 46, "episodes": 9},
+    {"title": "Echo", "year": 2024, "type": "show", "phase": 5, "timeline_order": 47, "episodes": 5},
+    {"title": "Deadpool & Wolverine", "year": 2024, "type": "movie", "phase": 5, "timeline_order": 48, "post_credits": 0},
+    {"title": "Agatha All Along", "year": 2024, "type": "show", "phase": 5, "timeline_order": 49, "episodes": 9},
+    {"title": "What If...? Season 3", "year": 2024, "type": "show", "phase": 5, "timeline_order": 50, "episodes": 8},
+    {"title": "Captain America: Brave New World", "year": 2025, "type": "movie", "phase": 5, "timeline_order": 51, "post_credits": 2},
+    {"title": "Daredevil: Born Again", "year": 2025, "type": "show", "phase": 5, "timeline_order": 52, "episodes": 9},
+    {"title": "Thunderbolts*", "year": 2025, "type": "movie", "phase": 5, "timeline_order": 53, "post_credits": 2},
+    {"title": "Ironheart", "year": 2025, "type": "show", "phase": 5, "timeline_order": 54, "episodes": 6},
+    
+    # Phase 6 (upcoming)
+    {"title": "The Fantastic Four: First Steps", "year": 2025, "type": "movie", "phase": 6, "timeline_order": 55, "upcoming": True},
+    {"title": "Blade", "year": 2026, "type": "movie", "phase": 6, "timeline_order": 56, "upcoming": True},
+    {"title": "Avengers: Doomsday", "year": 2026, "type": "movie", "phase": 6, "timeline_order": 57, "upcoming": True},
+    {"title": "Spider-Man 4", "year": 2026, "type": "movie", "phase": 6, "timeline_order": 58, "upcoming": True},
+    {"title": "Avengers: Secret Wars", "year": 2027, "type": "movie", "phase": 6, "timeline_order": 59, "upcoming": True},
+]
+
+CONFIG_DIR = Path.home() / ".config" / "mcu"
+CONFIG_FILE = CONFIG_DIR / "watched.json"
+
+def load_watched():
+    """Load watched status from config file."""
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    return {"watched": [], "ratings": {}}
+
+def save_watched(data):
+    """Save watched status to config file."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def normalize_title(title):
+    """Normalize title for matching."""
+    return title.lower().strip()
+
+def find_content(query):
+    """Find content by title (fuzzy match)."""
+    query_norm = normalize_title(query)
+    
+    # Exact match first
+    for item in MCU_CONTENT:
+        if normalize_title(item["title"]) == query_norm:
+            return item
+    
+    # Partial match
+    for item in MCU_CONTENT:
+        if query_norm in normalize_title(item["title"]):
+            return item
+    
+    return None
+
+def format_item(item, watched_data, show_order="release"):
+    """Format a content item for display."""
+    watched = item["title"] in watched_data["watched"]
+    status = "✓" if watched else "○"
+    
+    type_icon = {"movie": "🎬", "show": "📺", "special": "🎃"}.get(item["type"], "📀")
+    
+    line = f"{status} {type_icon} {item['title']} ({item['year']})"
+    
+    if item.get("post_credits"):
+        line += f" [🎬 {item['post_credits']} post-credits]"
+    
+    if item.get("episodes"):
+        line += f" [{item['episodes']} eps]"
+    
+    if item.get("upcoming"):
+        line += " ⏳"
+    
+    if item.get("note"):
+        line += f" ({item['note']})"
+    
+    rating = watched_data.get("ratings", {}).get(item["title"])
+    if rating:
+        line += f" ★{rating}"
+    
+    return line
+
+def cmd_list(args, watched_data):
+    """List all MCU content."""
+    if args.order == "timeline":
+        items = sorted(MCU_CONTENT, key=lambda x: x["timeline_order"])
+    else:
+        items = sorted(MCU_CONTENT, key=lambda x: (x["year"], x.get("timeline_order", 0)))
+    
+    # Filter by type
+    if args.movies:
+        items = [i for i in items if i["type"] == "movie"]
+    elif args.shows:
+        items = [i for i in items if i["type"] in ("show", "special")]
+    
+    # Filter by phase
+    if args.phase:
+        items = [i for i in items if i["phase"] == args.phase]
+    
+    # Filter by watched status
+    if args.unwatched:
+        items = [i for i in items if i["title"] not in watched_data["watched"]]
+    elif args.watched_only:
+        items = [i for i in items if i["title"] in watched_data["watched"]]
+    
+    current_phase = None
+    for item in items:
+        if args.by_phase and item["phase"] != current_phase:
+            current_phase = item["phase"]
+            print(f"\n=== Phase {current_phase} ===")
+        print(format_item(item, watched_data, args.order))
+    
+    # Stats
+    total = len(MCU_CONTENT)
+    watched_count = len([i for i in MCU_CONTENT if i["title"] in watched_data["watched"]])
+    upcoming_count = len([i for i in MCU_CONTENT if i.get("upcoming")])
+    print(f"\n📊 {watched_count}/{total - upcoming_count} watched ({upcoming_count} upcoming)")
+
+def cmd_watch(args, watched_data):
+    """Mark content as watched."""
+    item = find_content(args.title)
+    if not item:
+        print(f"❌ Not found: {args.title}")
+        print("Try: mcu list | grep -i 'search term'")
+        return
+    
+    if item["title"] not in watched_data["watched"]:
+        watched_data["watched"].append(item["title"])
+    
+    if args.rating:
+        watched_data["ratings"][item["title"]] = args.rating
+    
+    save_watched(watched_data)
+    print(f"✓ Marked as watched: {item['title']}")
+    
+    if item.get("post_credits"):
+        print(f"   🎬 Don't forget: {item['post_credits']} post-credits scene(s)!")
+
+def cmd_unwatch(args, watched_data):
+    """Mark content as unwatched."""
+    item = find_content(args.title)
+    if not item:
+        print(f"❌ Not found: {args.title}")
+        return
+    
+    if item["title"] in watched_data["watched"]:
+        watched_data["watched"].remove(item["title"])
+        save_watched(watched_data)
+        print(f"○ Marked as unwatched: {item['title']}")
+    else:
+        print(f"Already unwatched: {item['title']}")
+
+def cmd_next(args, watched_data):
+    """Show what to watch next."""
+    if args.timeline:
+        items = sorted(MCU_CONTENT, key=lambda x: x["timeline_order"])
+    else:
+        items = sorted(MCU_CONTENT, key=lambda x: (x["year"], x.get("timeline_order", 0)))
+    
+    unwatched = [i for i in items if i["title"] not in watched_data["watched"] and not i.get("upcoming")]
+    
+    if not unwatched:
+        print("🎉 You've watched everything! Check upcoming releases with: mcu upcoming")
+        return
+    
+    next_item = unwatched[0]
+    print(f"📺 Next up ({args.timeline and 'timeline' or 'release'} order):\n")
+    print(format_item(next_item, watched_data))
+    
+    if next_item.get("post_credits"):
+        print(f"\n🎬 Stay for {next_item['post_credits']} post-credits scene(s)!")
+    
+    if len(unwatched) > 1:
+        print(f"\n({len(unwatched) - 1} more to go)")
+
+def cmd_upcoming(args, watched_data):
+    """Show upcoming releases."""
+    upcoming = [i for i in MCU_CONTENT if i.get("upcoming")]
+    upcoming = sorted(upcoming, key=lambda x: x["year"])
+    
+    if not upcoming:
+        print("No upcoming releases in database.")
+        return
+    
+    print("⏳ Upcoming MCU releases:\n")
+    for item in upcoming:
+        print(format_item(item, watched_data))
+
+def cmd_info(args, watched_data):
+    """Show detailed info about a title."""
+    item = find_content(args.title)
+    if not item:
+        print(f"❌ Not found: {args.title}")
+        return
+    
+    watched = item["title"] in watched_data["watched"]
+    
+    print(f"\n{'✓' if watched else '○'} {item['title']}")
+    print(f"   Year: {item['year']}")
+    print(f"   Type: {item['type'].title()}")
+    print(f"   Phase: {item['phase']}")
+    print(f"   Timeline Position: #{item['timeline_order']}")
+    
+    if item.get("post_credits"):
+        print(f"   Post-credits: {item['post_credits']} scene(s)")
+    
+    if item.get("episodes"):
+        print(f"   Episodes: {item['episodes']}")
+    
+    if item.get("note"):
+        print(f"   Note: {item['note']}")
+    
+    if item.get("upcoming"):
+        print(f"   Status: ⏳ Upcoming")
+    
+    rating = watched_data.get("ratings", {}).get(item["title"])
+    if rating:
+        print(f"   Your Rating: ★{rating}/10")
+
+def cmd_stats(args, watched_data):
+    """Show watch statistics."""
+    total = len(MCU_CONTENT)
+    upcoming = len([i for i in MCU_CONTENT if i.get("upcoming")])
+    released = total - upcoming
+    watched = len([i for i in MCU_CONTENT if i["title"] in watched_data["watched"]])
+    
+    movies = len([i for i in MCU_CONTENT if i["type"] == "movie" and not i.get("upcoming")])
+    movies_watched = len([i for i in MCU_CONTENT if i["type"] == "movie" and i["title"] in watched_data["watched"]])
+    
+    shows = len([i for i in MCU_CONTENT if i["type"] in ("show", "special") and not i.get("upcoming")])
+    shows_watched = len([i for i in MCU_CONTENT if i["type"] in ("show", "special") and i["title"] in watched_data["watched"]])
+    
+    print("📊 MCU Watch Statistics\n")
+    print(f"   Overall: {watched}/{released} ({watched*100//released}%)")
+    print(f"   Movies:  {movies_watched}/{movies}")
+    print(f"   Shows:   {shows_watched}/{shows}")
+    print(f"   Upcoming: {upcoming} releases")
+    
+    # By phase
+    print("\n   By Phase:")
+    for phase in range(1, 7):
+        phase_items = [i for i in MCU_CONTENT if i["phase"] == phase and not i.get("upcoming")]
+        phase_watched = len([i for i in phase_items if i["title"] in watched_data["watched"]])
+        if phase_items:
+            bar = "█" * (phase_watched * 10 // len(phase_items)) + "░" * (10 - phase_watched * 10 // len(phase_items))
+            print(f"   Phase {phase}: {bar} {phase_watched}/{len(phase_items)}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Track your Marvel Cinematic Universe progress",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  mcu list                    # List all MCU content
+  mcu list --unwatched        # Show only unwatched
+  mcu list --phase 3          # Show Phase 3 only
+  mcu list --timeline         # Order by in-universe timeline
+  mcu watch "Deadpool"        # Mark as watched
+  mcu watch "Endgame" -r 10   # Mark watched with rating
+  mcu next                    # What should I watch next?
+  mcu next --timeline         # Next by timeline order
+  mcu upcoming                # Show upcoming releases
+  mcu info "Iron Man"         # Show details
+  mcu stats                   # Watch statistics
+        """
+    )
+    
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    
+    # list
+    list_parser = subparsers.add_parser("list", aliases=["ls"], help="List MCU content")
+    list_parser.add_argument("--timeline", "-t", action="store_true", help="Order by in-universe timeline")
+    list_parser.add_argument("--movies", "-m", action="store_true", help="Movies only")
+    list_parser.add_argument("--shows", "-s", action="store_true", help="Shows only")
+    list_parser.add_argument("--phase", "-p", type=int, help="Filter by phase (1-6)")
+    list_parser.add_argument("--unwatched", "-u", action="store_true", help="Unwatched only")
+    list_parser.add_argument("--watched-only", "-w", action="store_true", help="Watched only")
+    list_parser.add_argument("--by-phase", "-b", action="store_true", help="Group by phase")
+    list_parser.set_defaults(order="release")
+    
+    # watch
+    watch_parser = subparsers.add_parser("watch", aliases=["w"], help="Mark as watched")
+    watch_parser.add_argument("title", help="Title to mark as watched")
+    watch_parser.add_argument("--rating", "-r", type=int, choices=range(1, 11), help="Rating 1-10")
+    
+    # unwatch
+    unwatch_parser = subparsers.add_parser("unwatch", help="Mark as unwatched")
+    unwatch_parser.add_argument("title", help="Title to mark as unwatched")
+    
+    # next
+    next_parser = subparsers.add_parser("next", aliases=["n"], help="What to watch next")
+    next_parser.add_argument("--timeline", "-t", action="store_true", help="By timeline order")
+    
+    # upcoming
+    subparsers.add_parser("upcoming", aliases=["u"], help="Upcoming releases")
+    
+    # info
+    info_parser = subparsers.add_parser("info", aliases=["i"], help="Show title info")
+    info_parser.add_argument("title", help="Title to show info for")
+    
+    # stats
+    subparsers.add_parser("stats", help="Watch statistics")
+    
+    args = parser.parse_args()
+    watched_data = load_watched()
+    
+    if args.command in ("list", "ls"):
+        if args.timeline:
+            args.order = "timeline"
+        cmd_list(args, watched_data)
+    elif args.command in ("watch", "w"):
+        cmd_watch(args, watched_data)
+    elif args.command == "unwatch":
+        cmd_unwatch(args, watched_data)
+    elif args.command in ("next", "n"):
+        cmd_next(args, watched_data)
+    elif args.command in ("upcoming", "u"):
+        cmd_upcoming(args, watched_data)
+    elif args.command in ("info", "i"):
+        cmd_info(args, watched_data)
+    elif args.command == "stats":
+        cmd_stats(args, watched_data)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

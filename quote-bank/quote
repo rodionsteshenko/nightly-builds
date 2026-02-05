@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+"""
+quote-bank: Personal quote collector and retriever
+Store memorable lines from TV shows, movies, books, and life.
+"""
+
+import argparse
+import json
+import os
+import random
+import sys
+from datetime import datetime
+from pathlib import Path
+
+CONFIG_DIR = Path.home() / ".config" / "quotes"
+QUOTES_FILE = CONFIG_DIR / "quotes.json"
+
+def load_quotes():
+    """Load quotes from storage."""
+    if not QUOTES_FILE.exists():
+        return []
+    with open(QUOTES_FILE, "r") as f:
+        return json.load(f)
+
+def save_quotes(quotes):
+    """Save quotes to storage."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(QUOTES_FILE, "w") as f:
+        json.dump(quotes, f, indent=2)
+
+def format_quote(q, show_id=False, compact=False):
+    """Format a quote for display."""
+    lines = []
+    
+    if compact:
+        source_str = f" — {q['source']}" if q.get('source') else ""
+        return f'"{q["text"]}"{source_str}'
+    
+    lines.append(f'  "{q["text"]}"')
+    
+    meta = []
+    if q.get("source"):
+        meta.append(q["source"])
+    if q.get("speaker"):
+        meta.append(f"({q['speaker']})")
+    
+    if meta:
+        lines.append(f"  — {' '.join(meta)}")
+    
+    if q.get("tags"):
+        lines.append(f"  Tags: {', '.join(q['tags'])}")
+    
+    if show_id:
+        lines.append(f"  ID: {q['id']}")
+    
+    return "\n".join(lines)
+
+def cmd_add(args):
+    """Add a new quote."""
+    quotes = load_quotes()
+    
+    # Generate ID
+    max_id = max((q.get("id", 0) for q in quotes), default=0)
+    new_id = max_id + 1
+    
+    # Parse tags
+    tags = []
+    if args.tags:
+        tags = [t.strip() for t in args.tags.split(",")]
+    
+    quote = {
+        "id": new_id,
+        "text": args.text,
+        "source": args.source,
+        "speaker": args.speaker,
+        "tags": tags,
+        "added": datetime.now().isoformat(),
+    }
+    
+    quotes.append(quote)
+    save_quotes(quotes)
+    
+    print(f"✓ Added quote #{new_id}")
+    print()
+    print(format_quote(quote))
+
+def cmd_random(args):
+    """Show a random quote."""
+    quotes = load_quotes()
+    
+    if not quotes:
+        print("No quotes yet. Add some with: quote add \"your quote\"")
+        return
+    
+    # Filter by tag if specified
+    if args.tag:
+        quotes = [q for q in quotes if args.tag.lower() in [t.lower() for t in q.get("tags", [])]]
+        if not quotes:
+            print(f"No quotes with tag '{args.tag}'")
+            return
+    
+    # Filter by source if specified
+    if args.source:
+        quotes = [q for q in quotes if args.source.lower() in (q.get("source") or "").lower()]
+        if not quotes:
+            print(f"No quotes from '{args.source}'")
+            return
+    
+    q = random.choice(quotes)
+    print()
+    print(format_quote(q))
+    print()
+
+def cmd_search(args):
+    """Search quotes by text, source, or tags."""
+    quotes = load_quotes()
+    query = args.query.lower()
+    
+    results = []
+    for q in quotes:
+        if query in q["text"].lower():
+            results.append(q)
+        elif q.get("source") and query in q["source"].lower():
+            results.append(q)
+        elif q.get("speaker") and query in q["speaker"].lower():
+            results.append(q)
+        elif any(query in t.lower() for t in q.get("tags", [])):
+            results.append(q)
+    
+    if not results:
+        print(f"No quotes matching '{args.query}'")
+        return
+    
+    print(f"Found {len(results)} quote(s):\n")
+    for q in results:
+        print(format_quote(q, show_id=True))
+        print()
+
+def cmd_list(args):
+    """List quotes with optional filters."""
+    quotes = load_quotes()
+    
+    if not quotes:
+        print("No quotes yet. Add some with: quote add \"your quote\"")
+        return
+    
+    # Filter by source
+    if args.source:
+        quotes = [q for q in quotes if args.source.lower() in (q.get("source") or "").lower()]
+    
+    # Filter by tag
+    if args.tag:
+        quotes = [q for q in quotes if args.tag.lower() in [t.lower() for t in q.get("tags", [])]]
+    
+    # Filter by speaker
+    if args.speaker:
+        quotes = [q for q in quotes if args.speaker.lower() in (q.get("speaker") or "").lower()]
+    
+    if not quotes:
+        print("No quotes match those filters.")
+        return
+    
+    # Sort options
+    if args.sort == "recent":
+        quotes = sorted(quotes, key=lambda x: x.get("added", ""), reverse=True)
+    elif args.sort == "source":
+        quotes = sorted(quotes, key=lambda x: (x.get("source") or "zzz").lower())
+    
+    # Limit
+    if args.limit:
+        quotes = quotes[:args.limit]
+    
+    print(f"Showing {len(quotes)} quote(s):\n")
+    for q in quotes:
+        print(format_quote(q, show_id=args.ids))
+        print()
+
+def cmd_delete(args):
+    """Delete a quote by ID."""
+    quotes = load_quotes()
+    
+    original_len = len(quotes)
+    quotes = [q for q in quotes if q.get("id") != args.id]
+    
+    if len(quotes) == original_len:
+        print(f"No quote with ID {args.id}")
+        return
+    
+    save_quotes(quotes)
+    print(f"✓ Deleted quote #{args.id}")
+
+def cmd_sources(args):
+    """List all sources with quote counts."""
+    quotes = load_quotes()
+    
+    sources = {}
+    for q in quotes:
+        source = q.get("source") or "(no source)"
+        sources[source] = sources.get(source, 0) + 1
+    
+    if not sources:
+        print("No quotes yet.")
+        return
+    
+    print("Sources:\n")
+    for source, count in sorted(sources.items(), key=lambda x: -x[1]):
+        print(f"  {source}: {count} quote(s)")
+
+def cmd_tags(args):
+    """List all tags with quote counts."""
+    quotes = load_quotes()
+    
+    tags = {}
+    for q in quotes:
+        for tag in q.get("tags", []):
+            tags[tag] = tags.get(tag, 0) + 1
+    
+    if not tags:
+        print("No tags yet.")
+        return
+    
+    print("Tags:\n")
+    for tag, count in sorted(tags.items(), key=lambda x: -x[1]):
+        print(f"  {tag}: {count} quote(s)")
+
+def cmd_export(args):
+    """Export quotes to markdown."""
+    quotes = load_quotes()
+    
+    if not quotes:
+        print("No quotes to export.", file=sys.stderr)
+        return
+    
+    # Filter if source specified
+    if args.source:
+        quotes = [q for q in quotes if args.source.lower() in (q.get("source") or "").lower()]
+    
+    # Filter if tag specified
+    if args.tag:
+        quotes = [q for q in quotes if args.tag.lower() in [t.lower() for t in q.get("tags", [])]]
+    
+    lines = ["# Quotes\n"]
+    
+    if args.by_source:
+        # Group by source
+        by_source = {}
+        for q in quotes:
+            source = q.get("source") or "Unsourced"
+            if source not in by_source:
+                by_source[source] = []
+            by_source[source].append(q)
+        
+        for source in sorted(by_source.keys()):
+            lines.append(f"\n## {source}\n")
+            for q in by_source[source]:
+                speaker = f" — {q['speaker']}" if q.get('speaker') else ""
+                lines.append(f'> "{q["text"]}"{speaker}\n')
+    else:
+        # Simple list
+        for q in quotes:
+            source_str = f" — {q['source']}" if q.get('source') else ""
+            speaker_str = f" ({q['speaker']})" if q.get('speaker') else ""
+            lines.append(f'> "{q["text"]}"{source_str}{speaker_str}\n')
+    
+    output = "\n".join(lines)
+    
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(output)
+        print(f"✓ Exported {len(quotes)} quotes to {args.output}")
+    else:
+        print(output)
+
+def cmd_import(args):
+    """Import quotes from a JSON file."""
+    quotes = load_quotes()
+    
+    with open(args.file, "r") as f:
+        imported = json.load(f)
+    
+    if not isinstance(imported, list):
+        print("Error: JSON file must contain an array of quotes", file=sys.stderr)
+        return
+    
+    # Get max ID
+    max_id = max((q.get("id", 0) for q in quotes), default=0)
+    
+    # Add imported quotes
+    added = 0
+    for item in imported:
+        if "text" not in item:
+            continue
+        
+        max_id += 1
+        quote = {
+            "id": max_id,
+            "text": item.get("text"),
+            "source": item.get("source"),
+            "speaker": item.get("speaker"),
+            "tags": item.get("tags", []),
+            "added": datetime.now().isoformat(),
+        }
+        quotes.append(quote)
+        added += 1
+    
+    save_quotes(quotes)
+    print(f"✓ Imported {added} quotes")
+
+def cmd_stats(args):
+    """Show quote collection statistics."""
+    quotes = load_quotes()
+    
+    if not quotes:
+        print("No quotes yet.")
+        return
+    
+    sources = set(q.get("source") for q in quotes if q.get("source"))
+    all_tags = set()
+    for q in quotes:
+        all_tags.update(q.get("tags", []))
+    
+    print("Quote Bank Stats")
+    print("================")
+    print(f"Total quotes: {len(quotes)}")
+    print(f"Unique sources: {len(sources)}")
+    print(f"Unique tags: {len(all_tags)}")
+    
+    if quotes:
+        # Most quoted source
+        source_counts = {}
+        for q in quotes:
+            source = q.get("source") or "(no source)"
+            source_counts[source] = source_counts.get(source, 0) + 1
+        top_source = max(source_counts.items(), key=lambda x: x[1])
+        print(f"Most quoted: {top_source[0]} ({top_source[1]} quotes)")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Personal quote collector and retriever",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  quote add "I've made a huge mistake." --source "Arrested Development" --speaker "Gob"
+  quote add "Cool. Cool cool cool." --source "Community" --speaker "Abed" --tags sitcom,catchphrase
+  quote random
+  quote random --tag wisdom
+  quote search "mistake"
+  quote list --source "Community"
+  quote export --md --by-source
+        """
+    )
+    
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    
+    # Add
+    add_p = subparsers.add_parser("add", help="Add a new quote")
+    add_p.add_argument("text", help="The quote text")
+    add_p.add_argument("--source", "-s", help="Source (movie, TV show, book, person)")
+    add_p.add_argument("--speaker", "-k", help="Speaker/character name")
+    add_p.add_argument("--tags", "-t", help="Comma-separated tags")
+    add_p.set_defaults(func=cmd_add)
+    
+    # Random
+    random_p = subparsers.add_parser("random", help="Show a random quote")
+    random_p.add_argument("--tag", "-t", help="Filter by tag")
+    random_p.add_argument("--source", "-s", help="Filter by source")
+    random_p.set_defaults(func=cmd_random)
+    
+    # Search
+    search_p = subparsers.add_parser("search", help="Search quotes")
+    search_p.add_argument("query", help="Search term")
+    search_p.set_defaults(func=cmd_search)
+    
+    # List
+    list_p = subparsers.add_parser("list", help="List quotes")
+    list_p.add_argument("--source", "-s", help="Filter by source")
+    list_p.add_argument("--tag", "-t", help="Filter by tag")
+    list_p.add_argument("--speaker", "-k", help="Filter by speaker")
+    list_p.add_argument("--sort", choices=["recent", "source"], default="recent")
+    list_p.add_argument("--limit", "-n", type=int, help="Limit results")
+    list_p.add_argument("--ids", action="store_true", help="Show quote IDs")
+    list_p.set_defaults(func=cmd_list)
+    
+    # Delete
+    delete_p = subparsers.add_parser("delete", help="Delete a quote by ID")
+    delete_p.add_argument("id", type=int, help="Quote ID to delete")
+    delete_p.set_defaults(func=cmd_delete)
+    
+    # Sources
+    sources_p = subparsers.add_parser("sources", help="List all sources")
+    sources_p.set_defaults(func=cmd_sources)
+    
+    # Tags
+    tags_p = subparsers.add_parser("tags", help="List all tags")
+    tags_p.set_defaults(func=cmd_tags)
+    
+    # Export
+    export_p = subparsers.add_parser("export", help="Export quotes to markdown")
+    export_p.add_argument("--output", "-o", help="Output file (stdout if not specified)")
+    export_p.add_argument("--source", "-s", help="Filter by source")
+    export_p.add_argument("--tag", "-t", help="Filter by tag")
+    export_p.add_argument("--by-source", action="store_true", help="Group by source")
+    export_p.set_defaults(func=cmd_export)
+    
+    # Import
+    import_p = subparsers.add_parser("import", help="Import quotes from JSON")
+    import_p.add_argument("file", help="JSON file to import")
+    import_p.set_defaults(func=cmd_import)
+    
+    # Stats
+    stats_p = subparsers.add_parser("stats", help="Show collection statistics")
+    stats_p.set_defaults(func=cmd_stats)
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        # Default to random if quotes exist, otherwise show help
+        quotes = load_quotes()
+        if quotes:
+            args.tag = None
+            args.source = None
+            cmd_random(args)
+        else:
+            parser.print_help()
+        return
+    
+    args.func(args)
+
+if __name__ == "__main__":
+    main()
