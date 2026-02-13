@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""
+ports — the process/port commands you could never remember
+
+Usage:
+  ports who <port>           Show what's using a port
+  ports list [--all]         List all listening ports
+  ports kill <port> [opts]   Kill the process on a port
+  ports explain <command>    Show the underlying shell commands
+  ports free <port>          Check if a port is free
+
+Examples:
+  ports who 3000
+  ports who :8080
+  ports list
+  ports kill 3000 --grace 2
+  ports explain who
+"""
+
+import argparse
+import subprocess
+import sys
+import os
+import signal
+import time
+from typing import Optional, List, Dict
+
+# ANSI colors
+RED = "\033[91m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+BLUE = "\033[94m"
+CYAN = "\033[96m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+def is_macos() -> bool:
+    return sys.platform == "darwin"
+
+def is_linux() -> bool:
+    return sys.platform.startswith("linux")
+
+def normalize_port(port_str: str) -> int:
+    """Strip leading colon and convert to int."""
+    return int(port_str.lstrip(":"))
+
+def get_commands() -> Dict[str, Dict[str, str]]:
+    """Return platform-specific commands with explanations."""
+    if is_macos():
+        return {
+            "who": {
+                "cmd": "lsof -iTCP:{port} -sTCP:LISTEN -P -n",
+                "explain": (
+                    "lsof = list open files (including network sockets)\n"
+                    "  -iTCP:{port}  → filter to TCP connections on this port\n"
+                    "  -sTCP:LISTEN  → only show listeners (not clients)\n"
+                    "  -P            → don't convert port numbers to names\n"
+                    "  -n            → don't resolve hostnames (faster)"
+                )
+            },
+            "list": {
+                "cmd": "lsof -iTCP -sTCP:LISTEN -P -n",
+                "explain": (
+                    "Same as 'who' but without port filter.\n"
+                    "Shows all processes listening on any TCP port."
+                )
+            },
+            "pid_for_port": {
+                "cmd": "lsof -t -iTCP:{port} -sTCP:LISTEN",
+                "explain": (
+                    "  -t  → terse output (just PIDs, one per line)\n"
+                    "Used to get the PID for killing."
+                )
+            }
+        }
+    else:  # Linux
+        return {
+            "who": {
+                "cmd": "ss -tlnp sport = :{port}",
+                "explain": (
+                    "ss = socket statistics (modern replacement for netstat)\n"
+                    "  -t            → TCP sockets\n"
+                    "  -l            → listening sockets only\n"
+                    "  -n            → don't resolve names\n"
+                    "  -p            → show process info\n"
+                    "  sport = :{port} → filter by source port"
+                )
+            },
+            "list": {
+                "cmd": "ss -tlnp",
+                "explain": "List all TCP listening sockets with process info."
+            },
+            "pid_for_port": {
+                "cmd": "ss -tlnp sport = :{port} | grep -oP 'pid=\\K[0-9]+'",
+                "explain": "Extract PID from ss output using grep."
+            }
+        }
+
+def run_cmd(cmd: str, capture: bool = True) -> tuple:
+    """Run a shell command, return (stdout, stderr, returncode)."""
+    result = subprocess.run(
+        cmd, shell=True, capture_output=capture, text=True
+    )
+    return result.stdout, result.stderr, result.returncode
+
+def cmd_who(port: int, verbose: bool = False) -> None:
+    """Show what's using a port."""
+    commands = get_commands()
+    cmd = commands["who"]["cmd"].format(port=port)
+    
+    if verbose:
+        print(f"{DIM}$ {cmd}{RESET}\n")
+    
+    stdout, stderr, rc = run_cmd(cmd)
+    
+    if rc != 0 or not stdout.strip():
+        print(f"{GREEN}✓ Port {port} is free{RESET}")
+        return
+    
+    lines = stdout.strip().split("\n")
+    if is_macos() and len(lines) > 1:
+        # Parse lsof output
+        header = lines[0]
+        print(f"{BOLD}Port {port} is in use:{RESET}\n")
+        
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) >= 9:
+                proc_name = parts[0]
+                pid = parts[1]
+                user = parts[2]
+                
+                print(f"  {CYAN}Process:{RESET}  {proc_name}")
+                print(f"  {CYAN}PID:{RESET}      {pid}")
+                print(f"  {CYAN}User:{RESET}     {user}")
+                
+                # Get more info about the process
+                cwd_out, _, _ = run_cmd(f"lsof -p {pid} 2>/dev/null | grep cwd | awk '{{print $NF}}'")
+                if cwd_out.strip():
+                    print(f"  {CYAN}CWD:{RESET}      {cwd_out.strip()}")
+                
+                # Get command line
+                cmd_out, _, _ = run_cmd(f"ps -p {pid} -o args= 2>/dev/null")
+                if cmd_out.strip():
+                    cmdline = cmd_out.strip()
+                    if len(cmdline) > 80:
+                        cmdline = cmdline[:77] + "..."
+                    print(f"  {CYAN}Command:{RESET}  {cmdline}")
+                
+                # Get start time
+                start_out, _, _ = run_cmd(f"ps -p {pid} -o lstart= 2>/dev/null")
+                if start_out.strip():
+                    print(f"  {CYAN}Started:{RESET}  {start_out.strip()}")
+                
+                print()
+    else:
+        # Just print raw output
+        print(stdout)
+
+def cmd_list(show_all: bool = False) -> None:
+    """List all listening ports."""
+    commands = get_commands()
+    cmd = commands["list"]["cmd"]
+    
+    stdout, stderr, rc = run_cmd(cmd)
+    
+    if not stdout.strip():
+        print("No listening ports found.")
+        return
+    
+    if is_macos():
+        lines = stdout.strip().split("\n")
+        if len(lines) > 1:
+            # Group by port
+            ports_info = {}
+            for line in lines[1:]:
+                parts = line.split()
+                if len(parts) >= 9:
+                    proc_name = parts[0]
+                    pid = parts[1]
+                    # Find port number (format: *:PORT or 127.0.0.1:PORT)
+                    name_col = parts[8] if len(parts) > 8 else ""
+                    if ":" in name_col:
+                        port = name_col.split(":")[-1]
+                        key = f"{port}"
+                        if key not in ports_info or show_all:
+                            ports_info[key] = {"proc": proc_name, "pid": pid, "port": port}
+            
+            print(f"{BOLD}Listening ports:{RESET}\n")
+            print(f"  {'PORT':<8} {'PID':<8} {'PROCESS':<20}")
+            print(f"  {'-'*8} {'-'*8} {'-'*20}")
+            
+            for info in sorted(ports_info.values(), key=lambda x: int(x['port']) if x['port'].isdigit() else 0):
+                print(f"  {info['port']:<8} {info['pid']:<8} {info['proc']:<20}")
+    else:
+        print(stdout)
+
+def cmd_kill(port: int, grace: int = 2, force: bool = False, yes: bool = False) -> None:
+    """Kill the process on a port."""
+    commands = get_commands()
+    cmd = commands["pid_for_port"]["cmd"].format(port=port)
+    
+    stdout, stderr, rc = run_cmd(cmd)
+    pids = [p.strip() for p in stdout.strip().split("\n") if p.strip()]
+    
+    if not pids:
+        print(f"{GREEN}✓ Port {port} is already free{RESET}")
+        return
+    
+    # Show what we're about to kill
+    print(f"{YELLOW}Found process(es) on port {port}:{RESET}\n")
+    for pid in pids:
+        cmd_out, _, _ = run_cmd(f"ps -p {pid} -o pid,user,args 2>/dev/null")
+        if cmd_out.strip():
+            print(f"  {cmd_out.strip()}")
+    print()
+    
+    if not yes:
+        try:
+            answer = input(f"Kill {'these' if len(pids) > 1 else 'this'} process{'es' if len(pids) > 1 else ''}? [y/N] ")
+            if answer.lower() not in ('y', 'yes'):
+                print("Aborted.")
+                return
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return
+    
+    for pid in pids:
+        print(f"Sending SIGTERM to PID {pid}...")
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            print(f"  Process {pid} already gone")
+            continue
+        except PermissionError:
+            print(f"  {RED}Permission denied for PID {pid} (try sudo){RESET}")
+            continue
+        
+        # Wait for graceful shutdown
+        for _ in range(grace * 10):
+            time.sleep(0.1)
+            try:
+                os.kill(int(pid), 0)  # Check if still alive
+            except ProcessLookupError:
+                print(f"  {GREEN}✓ PID {pid} terminated gracefully{RESET}")
+                break
+        else:
+            if force:
+                print(f"  Sending SIGKILL to PID {pid}...")
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                    print(f"  {GREEN}✓ PID {pid} killed{RESET}")
+                except ProcessLookupError:
+                    print(f"  Process {pid} already gone")
+            else:
+                print(f"  {YELLOW}⚠ PID {pid} still running (use --force for SIGKILL){RESET}")
+
+def cmd_free(port: int) -> None:
+    """Check if a port is free."""
+    commands = get_commands()
+    cmd = commands["pid_for_port"]["cmd"].format(port=port)
+    
+    stdout, stderr, rc = run_cmd(cmd)
+    pids = [p.strip() for p in stdout.strip().split("\n") if p.strip()]
+    
+    if pids:
+        print(f"{RED}✗ Port {port} is in use (PID: {', '.join(pids)}){RESET}")
+        sys.exit(1)
+    else:
+        print(f"{GREEN}✓ Port {port} is free{RESET}")
+        sys.exit(0)
+
+def cmd_explain(command: str) -> None:
+    """Explain the underlying shell commands."""
+    commands = get_commands()
+    
+    if command == "all":
+        for name, info in commands.items():
+            print(f"{BOLD}{name}:{RESET}")
+            print(f"  {CYAN}Command:{RESET} {info['cmd']}")
+            print(f"  {CYAN}Explanation:{RESET}")
+            for line in info['explain'].split('\n'):
+                print(f"    {line}")
+            print()
+    elif command in commands:
+        info = commands[command]
+        print(f"{BOLD}{command}:{RESET}")
+        print(f"\n  {CYAN}Command:{RESET}")
+        print(f"    {info['cmd']}")
+        print(f"\n  {CYAN}Explanation:{RESET}")
+        for line in info['explain'].split('\n'):
+            print(f"    {line}")
+        print()
+        print(f"  {DIM}Platform: {'macOS' if is_macos() else 'Linux'}{RESET}")
+    else:
+        print(f"Unknown command: {command}")
+        print(f"Available: {', '.join(commands.keys())}, all")
+        sys.exit(1)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="The process/port commands you could never remember",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  ports who 3000          # What's on port 3000?
+  ports who :8080         # Colon prefix works too
+  ports list              # All listening ports
+  ports kill 3000         # Kill with confirmation
+  ports kill 3000 -y      # Kill without confirmation
+  ports free 5000         # Exit 0 if free, 1 if used
+  ports explain who       # How does 'who' work?
+  ports explain all       # Explain everything
+        """
+    )
+    
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    
+    # who
+    who_parser = subparsers.add_parser("who", help="Show what's using a port")
+    who_parser.add_argument("port", help="Port number (e.g., 3000 or :3000)")
+    who_parser.add_argument("-v", "--verbose", action="store_true", help="Show the command being run")
+    
+    # list
+    list_parser = subparsers.add_parser("list", help="List all listening ports")
+    list_parser.add_argument("-a", "--all", action="store_true", help="Show all entries (including duplicates)")
+    
+    # kill
+    kill_parser = subparsers.add_parser("kill", help="Kill the process on a port")
+    kill_parser.add_argument("port", help="Port number")
+    kill_parser.add_argument("-g", "--grace", type=int, default=2, help="Grace period in seconds (default: 2)")
+    kill_parser.add_argument("-f", "--force", action="store_true", help="Send SIGKILL after grace period")
+    kill_parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    
+    # free
+    free_parser = subparsers.add_parser("free", help="Check if a port is free (exit 0/1)")
+    free_parser.add_argument("port", help="Port number")
+    
+    # explain
+    explain_parser = subparsers.add_parser("explain", help="Explain the underlying commands")
+    explain_parser.add_argument("what", nargs="?", default="all", help="Command to explain (who, list, kill, all)")
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+    
+    if args.command == "who":
+        port = normalize_port(args.port)
+        cmd_who(port, args.verbose)
+    elif args.command == "list":
+        cmd_list(args.all)
+    elif args.command == "kill":
+        port = normalize_port(args.port)
+        cmd_kill(port, args.grace, args.force, args.yes)
+    elif args.command == "free":
+        port = normalize_port(args.port)
+        cmd_free(port)
+    elif args.command == "explain":
+        cmd_explain(args.what)
+
+if __name__ == "__main__":
+    main()
